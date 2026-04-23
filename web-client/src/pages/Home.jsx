@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ensureSeedProducts, getAllProducts } from '../services/posDb.js'
+import {
+  applySaleToInventory,
+  ensureSeedProducts,
+  getAllProducts,
+  getMeta,
+  migrateLocalProductsV2
+} from '../services/posDb.js'
 
 import { TOKENS } from '../utils/tokens.js'
 import {
@@ -23,7 +29,9 @@ import {
   X,
   XCircle
 } from 'lucide-react'
-import { useBridgeCart } from '../features/bridge/hooks/useBridgeCart.js'
+import { useBridgeCart } from '../hooks/useBridgeCart.js'
+import { clearBridgeSession } from '../utils/bridgeApi.js'
+import { useAuth } from '../contexts/AuthProvider.jsx'
 
 
 const CATEGORIES = ['All', 'Beverages', 'Snacks', 'Bakery', 'Canned']
@@ -37,7 +45,17 @@ function Skeleton() {
   return <div className="h-24 animate-pulse rounded-xl bg-slate-200" />
 }
 
+function formatProducts(items) {
+  return items.map((item) => ({
+    ...item,
+    category: String(item.category_id || '')
+      .replace(/[_-]/g, ' ')
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+  }))
+}
+
 export default function Home() {
+  const { user, signOut } = useAuth()
   const [uiState, setUiState] = useState('active')
   const [loading, setLoading] = useState(true)
   const [now, setNow] = useState(new Date())
@@ -57,28 +75,39 @@ export default function Home() {
   const searchRef = useRef(null)
   const idleRef = useRef(null)
 
-  const [cart, setCart] = useState([
-    { id: 'p1', name: 'Coke 1.5L', price: 89, qty: 2 },
-    { id: 'p2', name: 'Lucky Me Pancit', price: 18, qty: 3 }
-  ])
+  const effectiveOnline = uiState === 'offline' ? false : networkOnline
+  const syncing = uiState === 'syncing'
+  const bridgeEnabled = scanMode === 'pc_mobile' && effectiveOnline
+  const { sessionId, setSessionId, session } = useBridgeCart({
+    enabled: bridgeEnabled
+  })
+  const scannerPath = scanMode === 'pc_mobile' ? '/scanner/mobile' : '/scanner'
+
+  const [cart, setCart] = useState([])
+
+  const loadProducts = useCallback(async () => {
+    const items = await getAllProducts()
+    setProducts(formatProducts(items))
+  }, [])
 
   useEffect(() => {
     const clock = setInterval(() => setNow(new Date()), 1000)
     const onOnline = () => setNetworkOnline(true)
     const onOffline = () => setNetworkOnline(false)
 
+    
+
     ;(async () => {
       try {
         await ensureSeedProducts()
-        const items = await getAllProducts()
-        setProducts(
-          items.map((item) => ({
-            ...item,
-            category: String(item.category_id || '')
-              .replace(/[_-]/g, ' ')
-              .replace(/\b\w/g, (c) => c.toUpperCase())
-          }))
-        )
+        await loadProducts()
+
+        //
+        const migrated = await getMeta('products_migrated_v2');
+        if(!migrated?.value){
+          await migrateLocalProductsV2();
+          await loadProducts()
+        }
       } finally {
         setLoading(false)
       }
@@ -91,7 +120,7 @@ export default function Home() {
       window.removeEventListener('online', onOnline)
       window.removeEventListener('offline', onOffline)
     }
-  }, [])
+  }, [loadProducts])
 
   useEffect(() => {
     const resetIdle = () => {
@@ -111,14 +140,29 @@ export default function Home() {
     localStorage.setItem(HOME_MODE_KEY, scanMode)
   }, [scanMode])
 
-  const onCompleteSale = useCallback(() => {
-    if (!cart.length) return setUiState('failed')
+  const onCompleteSale = useCallback(async () => {
+    if (!cart.length) {
+      setUiState('failed')
+      return
+    }
+
+    await applySaleToInventory(cart)
+    await loadProducts()
+
+    if (bridgeEnabled) {
+      try {
+        await clearBridgeSession(sessionId)
+      } catch {
+        // Keep checkout successful even if clearing the remote bridge session fails.
+      }
+    }
+
     setUiState('success')
     setTimeout(() => {
       setCart([])
       setUiState('empty')
     }, 1500)
-  }, [cart.length])
+  }, [bridgeEnabled, cart, loadProducts, sessionId])
 
   useEffect(() => {
     const onKeys = (e) => {
@@ -141,22 +185,16 @@ export default function Home() {
 
   useEffect(() => {
     if (uiState === 'empty') setCart([])
-    if (uiState === 'active' && cart.length === 0) setCart([{ id: 'p1', name: 'Coke 1.5L', price: 89, qty: 1 }])
   }, [uiState])
 
-  const effectiveOnline = uiState === 'offline' ? false : networkOnline
-  const syncing = uiState === 'syncing'
-  const bridgeEnabled = scanMode === 'pc_mobile' && effectiveOnline
-  const { sessionId, setSessionId, session } = useBridgeCart({
-    enabled: bridgeEnabled
-  })
-  const scannerPath = scanMode === 'pc_mobile' ? '/scanner/mobile' : '/scanner'
+ 
 
   useEffect(() => {
     if (!bridgeEnabled || !session?.items) return
     setCart(
       session.items.map((i) => ({
         id: i.id || i.barcode,
+        barcode: i.barcode || '',
         name: i.name,
         price: Number(i.price || 0),
         qty: Number(i.qty || 1)
@@ -184,7 +222,18 @@ export default function Home() {
     setTimeout(() => setLastAdded(''), 240)
     setCart((prev) => {
       const index = prev.findIndex((x) => x.id === product.id)
-      if (index === -1) return [...prev, { id: product.id, name: product.name, price: product.price, qty: 1 }]
+      if (index === -1) {
+        return [
+          ...prev,
+          {
+            id: product.id,
+            barcode: product.barcode || '',
+            name: product.name,
+            price: product.price,
+            qty: 1
+          }
+        ]
+      }
       return prev.map((item) => item.id === product.id ? { ...item, qty: item.qty + 1 } : item)
     })
     setUiState('active')
@@ -240,7 +289,16 @@ export default function Home() {
             <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
               <span className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 ${effectiveOnline ? 'border-emerald-200 bg-emerald-100 text-emerald-700' : 'border-amber-200 bg-amber-100 text-amber-700'}`}>{effectiveOnline ? <Wifi size={14} /> : <WifiOff size={14} />}{effectiveOnline ? (syncing ? 'Syncing' : 'Online') : 'Offline'}</span>
               <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-slate-700"><Clock3 size={14} />{now.toLocaleDateString()} {now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-              <span className="inline-flex items-center gap-1 rounded-full border border-[#E5E7EB] bg-white px-3 py-1 text-slate-700"><UserCircle2 size={14} />Cashier Maria</span>
+              <span className="inline-flex items-center gap-1 rounded-full border border-[#E5E7EB] bg-white px-3 py-1 text-slate-700">
+                <UserCircle2 size={14} />
+                {user?.name || user?.email || 'Signed In'}
+              </span>
+              <button
+                onClick={signOut}
+                className="inline-flex items-center gap-1 rounded-full border border-[#E5E7EB] bg-white px-3 py-1 text-slate-700 transition hover:bg-slate-50"
+              >
+                Sign Out
+              </button>
             </div>
            
           </div>
