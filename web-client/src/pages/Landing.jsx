@@ -7,10 +7,10 @@ const Landing = () => {
         <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-6 py-4">
           <h1 className="text-xl font-bold tracking-tight">SariSari POS</h1>
           <a
-            href="/signin"
+            href="/auth"
             className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-emerald-400"
           >
-            Sign In
+            Get Started
           </a>
         </div>
       </header>
@@ -32,13 +32,13 @@ const Landing = () => {
               </p>
               <div className="mt-8 flex flex-wrap gap-3">
                 <a
-                  href="/signup"
+                  href="/auth?mode=signup"
                   className="rounded-xl bg-emerald-500 px-5 py-3 font-semibold text-slate-900 transition hover:bg-emerald-400"
                 >
                   Get Started Free
                 </a>
                 <a
-                  href="/signin"
+                  href="/auth?mode=signin"
                   className="rounded-xl border border-slate-700 px-5 py-3 font-semibold transition hover:border-slate-500"
                 >
                   I already have an account
@@ -92,7 +92,7 @@ const Landing = () => {
       <footer className="border-t border-slate-800 py-6">
         <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-6 text-sm text-slate-400">
           <p>© {new Date().getFullYear()} SariSari POS</p>
-          <a href="/signup" className="hover:text-slate-200">
+          <a href="/auth" className="hover:text-slate-200">
             Start now
           </a>
         </div>
